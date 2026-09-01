@@ -59,7 +59,7 @@ The core objective is to autonomously iterate on an algorithmic pipeline using t
 * `ablation_features.py`: Runs feature expansion ablations comparing standard 5-field features against 9-field and 13-field variants.
 
 
-* `agent.py`: Executes the autonomous research agent loop to sweep hyperparameters and optimize validation performance.
+* `agent.py`: Executes the autonomous research agent loop. Each iteration, an LLM (OpenAI API) is shown the full experiment history and proposes the next experiment — model/loss, feature set, and hyperparameters — with a stated hypothesis; falls back to a deterministic heuristic if the API is unavailable or proposes an invalid/duplicate config.
 
 
 * `submit.py`: Validates submission alignment and exports prediction CSV files.
@@ -90,6 +90,11 @@ cd TikTok_hackathon_project
 
 # Install required packages
 pip install numpy openai
+
+# Required for the autonomous agent's LLM-driven planner (agent.py)
+export OPENAI_API_KEY=your-key-here
+# Optional: override the default model (see test_openai.py)
+export AGENT_OPENAI_MODEL=gpt-5.6
 
 ```
 
@@ -139,7 +144,7 @@ python3 ablation_features.py ./KuaiRand-Pure/data
 
 ### 4. Execute the Autonomous Research Agent
 
-Launch the automated agent loop. The agent executes up to 8 automated iterations, adjusting learning rates and logging output to `experiment_log.json`:
+Launch the automated agent loop (requires `OPENAI_API_KEY`, see Setup above). Each iteration, an LLM proposes the next experiment across model/loss, feature set, and hyperparameters with a stated hypothesis; the agent validates the proposal, runs it, and logs the result to `experiment_log.json`. The run stops on the challenge's convergence rule (validation primary improves by ≤ 0.002 over 3 consecutive iterations), a 50-iteration cap, or a 6-hour wall-clock ceiling — whichever comes first. A run-level summary (iterations used, LLM token usage, wall-clock, best result) is written to `experiment_summary.json`:
 
 ```bash
 python3 agent.py
@@ -166,18 +171,24 @@ python3 submit.py submission.csv --score --split valid
 
 ## Autonomous Agent Architecture
 
-The agent operates through a multi-step execution loop:
+Each iteration of `agent.py` runs the following loop:
 
-1. **Baseline Verification**: Establishes initial baseline validation performance.
-
-
-2. **Pairwise Paradigm Shift**: Switches from pointwise binary cross-entropy to pairwise BPR loss.
+1. **Propose**: The LLM is shown the full experiment history — every prior config, its stated hypothesis, and its result or failure reason — and asked to propose the next experiment across three real pipeline levers: **model/loss** (`fm` pointwise binary cross-entropy vs. `bpr` pairwise Bayesian Personalized Ranking), **feature set** (any combination of 8 optional item-side/user-side fields on top of the fixed 5-field base), and **hyperparameters** (`lr`, `k`, `seed`), together with a one- or two-sentence hypothesis for why.
 
 
-3. **Adaptive Hyperparameter Tuning**: Automatically adjusts learning rates ($\text{lr} \times 3$, $\text{lr} / 3$) based on validation primary score feedback.
+2. **Validate**: The proposal is whitelist-validated before it is ever used to build a command — model/feature names are checked against known choices, `lr`/`k` are range-checked. If the LLM is unavailable, returns invalid JSON after one corrective retry, or proposes a configuration already tried, the agent falls back to a deterministic heuristic (start with the FM baseline, then BPR, then sweep nearby learning rates) so a single external-dependency failure can't stall the run. Each logged record notes which path produced it (`"planner": "llm"` vs. `"heuristic_fallback"`).
 
 
-4. **State Persistence**: Records hypotheses, configuration parameters, and execution outcomes directly into `experiment_log.json`.
+3. **Execute**: The chosen config is run as a subprocess (`baseline.py` or `bpr.py`) with a wall-clock timeout and one automatic retry on failure (crash, timeout, or unparseable output), so isolated failures are recovered from rather than crashing the run.
+
+
+4. **Record**: Hypothesis, the resulting config diff versus the previous experiment, validation GAUC/nDCG@5/primary (or the failure reason), and per-experiment wall-clock are persisted to `experiment_log.json`.
+
+
+5. **Check convergence**: The run stops once validation-best primary hasn't improved by more than `ε = 0.002` over the last `N = 3` successful iterations, or once the 50-iteration/6-hour budget is exhausted — whichever comes first. A final `experiment_summary.json` records the stop reason, iterations used, total LLM token usage, total wall-clock, and the best experiment.
+
+
+Note on scope: the LLM chooses *from* a validated, whitelisted parameter space (model, feature columns, hyperparameters) rather than generating and executing arbitrary Python each round — an unattended loop that `exec`s LLM-authored code was judged too risky for this timeline. The "config diff" logged per iteration reflects genuine pipeline-behavior changes (a different loss function, a different feature set, different hyperparameters), just expressed as a validated config rather than a literal source-file patch.
 
 
 
@@ -190,7 +201,7 @@ The agent operates through a multi-step execution loop:
 * **Pure NumPy Framework**: The current codebase relies on a custom NumPy engine. While lightweight, it limits scaling to complex neural architectures like Deep Interest Networks (DIN) or DLRM.
 
 
-* **Heuristic Search Space**: The existing `agent.py` uses heuristic candidate generation rather than full LLM-driven code modification.
+* **Constrained Decision Space**: `agent.py`'s LLM planner chooses from a validated set of levers (model/loss, feature columns, hyperparameters) rather than generating and executing arbitrary new code each iteration; it cannot yet invent a new loss function or model architecture outside what's already implemented in `baseline.py`/`bpr.py`.
 
 
 * **Pairwise Sampling Cost**: BPR pair generation is performed in CPU memory, restricting real-time online sampling flexibility.
@@ -200,7 +211,7 @@ The agent operates through a multi-step execution loop:
 ### Future Improvements
 
 * **Deep Learning Integration**: Migrate backend training to PyTorch/RecBole to support multi-layer perceptrons, cross networks, and attention mechanisms.
-* **LLM-Driven Agent Brain**: Replace rule-based logic in `agent.py` with full LLM code-generation agents (using OpenAI or Trae APIs) to autonomously edit features and architecture files.
+* **Freeform Code-Generation Agent**: Extend the LLM planner from choosing among validated parameters to actually writing and applying new model/loss code each iteration (in the style of AIDE/MLE-Bench-style agents), with sandboxed execution and automated correctness checks before a generated change is run.
 
 
 * **Multi-Task Learning**: Extend loss functions to joint click-through rate (CTR) and watch-time regression targets.

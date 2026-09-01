@@ -72,8 +72,8 @@ class FM:
     def predict(self, X, bs=200_000):
         return np.concatenate([self.logits(X[i:i + bs])[0] for i in range(0, len(X), bs)])
 
-def run_fm(splits, k=16, lr=0.001, epochs=40, bs=8192, patience=4, seed=0, verbose=True):
-    enc, dim = encode(splits)
+def run_fm(splits, k=16, lr=0.001, epochs=40, bs=8192, patience=4, seed=0, verbose=True, extra_fields=()):
+    enc, dim = encode(splits, extra_fields=extra_fields)
     Xtr, ytr, _ = enc['train']; Xva, yva, uva = enc['valid']; Xte, yte, ute = enc['test']
     m = FM(dim, k=k, lr=lr, seed=seed)
     rng = np.random.default_rng(seed)
@@ -106,12 +106,14 @@ if __name__ == '__main__':
     ap.add_argument('--lr', type=float, default=0.001)
     ap.add_argument('--epochs', type=int, default=40)
     ap.add_argument('--seed', type=int, default=0)
+    ap.add_argument('--features', default='', help='逗号分隔的扩展特征域，见 data.EXTRA_FIELD_CHOICES；留空=原始 5 域')
     a = ap.parse_args()
+    extra_fields = [f for f in a.features.split(',') if f]
     print(f"loading {a.data_dir} ...")
     splits = load(a.data_dir)
-    print({k_: len(v) for k_, v in splits.items()}, f"fields={FIELDS}")
+    print({k_: len(v) for k_, v in splits.items()}, f"fields={FIELDS + extra_fields}")
     res = {'pop': run_pop, 'random': lambda s: run_random(s, a.seed),
-           'fm': lambda s: run_fm(s, k=a.k, lr=a.lr, epochs=a.epochs, seed=a.seed)}[a.model](splits)
+           'fm': lambda s: run_fm(s, k=a.k, lr=a.lr, epochs=a.epochs, seed=a.seed, extra_fields=extra_fields)}[a.model](splits)
     print(f"\n=== {a.model} (seed={a.seed}) ===")
     for sp in ('valid', 'test'):
         r = res[sp]
